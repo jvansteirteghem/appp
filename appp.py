@@ -26,6 +26,7 @@ import ssl
 import sys
 from threading import activeCount, current_thread, Thread
 from time import time, sleep
+import base64
 
 try:
 	from OpenSSL import crypto
@@ -34,25 +35,10 @@ except ImportError:
 	sys.exit(1)
 
 __APP__ = 'APPP'
-__VERSION__ = '0.1.2'
+__VERSION__ = '0.2.0'
 
 BUFLEN = 4096
 TIMEOUT = 6
-
-HDRS = """POST %s HTTP/1.0\r\n\
-Accept-Encoding: identity\r\n\
-Content-Type: application/x-www-form-urlencoded\r\n\
-Connection: close\r\n\
-User-Agent: %s\r\n\
-"""
-
-PROXY_HDRS = """POST %s HTTP/1.0\r\n\
-Accept-Encoding: identity\r\n\
-Content-Type: application/x-www-form-urlencoded\r\n\
-Connection: close\r\n\
-User-Agent: %s\r\n\
-Proxy-Authorization: Basic %s\r\n\
-"""
 
 flag_exit = False
 logger = logging.getLogger(__name__)
@@ -288,12 +274,78 @@ class ConnectionHandler:
 		logger.debug('Request data size: %d' % self.data_size)
 		if self.data_size + len(self.client_hdrs) == len(self.client_buffer):
 			self.req_read = True
-
+		
 		try:
-			self.target = socket.create_connection(self.server[self.scheme + '_URL'])
-
-			s = self.server[self.scheme + '_HDRS'] + 'Content-Length: %s\r\n\r\n' % str(len(self.client_hdrs) + self.data_size)
-			logger.debug('Forwarding request to %s:%d\r\n' % (self.server['HTTP_URL']) + s)
+			s = "POST %s HTTP/1.0\r\n" % self.server[self.scheme + '_URL_RESOURCE']
+			s = s + 'Accept-Encoding: identity\r\n'
+			s = s + 'Content-Type: application/x-www-form-urlencoded\r\n'
+			s = s + 'Connection: close\r\n'
+			s = s + 'User-Agent: %s\r\n' % self.server['APPP_UA']
+			
+			i = 1
+			while i <= 5:
+				if self.server['CUSTOM_HEADER' + str(i)] != '':
+					s = s + self.server['CUSTOM_HEADER' + str(i)] + '\r\n'
+				i = i + 1
+			
+			if s.find('\r\nHost: ') == -1:
+				if self.server[self.scheme + '_URL_SCHEME'] == 'HTTP':
+					if self.server[self.scheme + '_URL_PORT'] == 80:
+						s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
+					else:
+						s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
+				else:
+					if self.server[self.scheme + '_URL_SCHEME'] == 'HTTPS':
+						if self.server[self.scheme + '_URL_PORT'] == 443:
+							s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
+						else:
+							s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
+			
+			s = s + 'Content-Length: %s\r\n' % str(len(self.client_hdrs) + self.data_size)
+			
+			if self.server['HTTP_PROXY_ADDR'] and self.server[self.scheme + '_URL_SCHEME'] == 'HTTP':
+				if self.server['HTTP_PROXY_USER']:
+					authorization = base64.standard_b64encode((self.server['HTTP_PROXY_USER'] + ':' + self.server['HTTP_PROXY_PASS']).encode()).decode()
+					s = s + 'Proxy-Authorization: Basic %s\r\n' % authorization
+				s = s + '\r\n'
+				
+				self.target = socket.create_connection((self.server['HTTP_PROXY_ADDR'], self.server['HTTP_PROXY_PORT']))
+			else:
+				if self.server['HTTPS_PROXY_ADDR'] and self.server[self.scheme + '_URL_SCHEME'] == 'HTTPS':
+					s = s + '\r\n'
+					
+					self.target = socket.create_connection((self.server['HTTPS_PROXY_ADDR'], self.server['HTTPS_PROXY_PORT']))
+					
+					s2 = 'CONNECT %s:%d HTTP/1.0\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
+					if self.server['HTTP_PROXY_USER']:
+						authorization = base64.standard_b64encode((self.server['HTTPS_PROXY_USER'] + ':' + self.server['HTTPS_PROXY_PASS']).encode()).decode()
+						s2 = s2 + 'Proxy-Authorization: Basic %s\r\n' % authorization
+					s2 = s2 + '\r\n'
+					
+					self.target.send(s2.encode())
+					
+					s3 = ''
+					while True:
+						s2 = self.target.recv(BUFLEN)
+						s3 = s3 + s2
+						end = s3.find(b'\r\n\r\n')
+						if len(s2) == 0:
+							break
+						if end != -1:
+							break
+					
+					self.target = ssl.wrap_socket(self.target, ssl_version = ssl.PROTOCOL_SSLv23)
+					self.target.do_handshake()
+				else:
+					s = s + '\r\n'
+					
+					self.target = socket.create_connection((self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT']))
+					if self.server[self.scheme + '_URL_SCHEME'] == "HTTPS":
+						self.target = ssl.wrap_socket(self.target, ssl_version = ssl.PROTOCOL_SSLv23)
+						self.target.do_handshake()
+			
+			logger.debug('Forwarding request to %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT']) + s)
+			
 			self.target.send(s.encode())
 			self._read_write(self.client_buffer, self.req_read, self.client, self.target)
 			self.client_buffer = b''
@@ -465,12 +517,13 @@ def test(server, scheme):
 def config(cfg, srv):
 	try:
 		logger.info('Processing [' + srv + '] configurations')
-
+		
 		server = dict(cfg.items(srv))
-
+		
 		server['APPP_UA'] = server['APPP_UA'] if server['APPP_UA'] else 'Python/' + sys.version.split()[0]
 		server['APPP_PORT'] = cfg.getint(srv, 'APPP_PORT')
 		server['TIMEOUT'] = cfg.getint(srv, 'TIMEOUT')
+		
 		if server['APPP_ADDR']:
 			try:
 				addr = socket.getaddrinfo(server['APPP_ADDR'], server['APPP_PORT'])
@@ -479,57 +532,42 @@ def config(cfg, srv):
 				return None
 			except Exception:
 				raise
-		_HDRS = HDRS
-		_PROXY_HDRS = PROXY_HDRS
-		for h in range(1,6):
-			h1 = 'CUSTOM_HEADER' + str(h)
-			if server[h1] != '':
-				_HDRS += server[h1] + '\r\n'
-				_PROXY_HDRS += server[h1] + '\r\n'
-
+		
 		for i in ('HTTP', 'HTTPS'):
-			# Using proxy
 			if server[i + '_PROXY_ADDR']:
-				proxy = (server[i + '_PROXY_ADDR'],
-					int(server[i + '_PROXY_PORT']) if server[i + '_PROXY_PORT'] else 80)
-				if server[i + '_PROXY_USER']:
-					import base64
-					auth = base64.encodestring((
-						server[i + '_PROXY_USER'] + ':' + server[i + '_PROXY_PASS']).encode()).decode().strip()
+				server[i + '_PROXY_PORT'] = int(server[i + '_PROXY_PORT'])
+			
+			server[i + '_URL_SCHEME'], server[i + '_URL_ADDR'], server[i + '_URL_PORT'], server[i + '_URL_RESOURCE'] = match(r"(http[s]?)://([0-9a-z\.\-]+)(:[0-9]+)?(/.*)", server[i + '_URL']).groups()
+			
+			server[i + '_URL_SCHEME'] = server[i + '_URL_SCHEME'].upper()
+			
+			if server[i + '_URL_PORT'] is None:
+				if server[i + '_URL_SCHEME'] == 'HTTP':
+					server[i + '_URL_PORT'] = 80
+				elif server[i + '_URL_SCHEME'] == 'HTTPS':
+					server[i + '_URL_PORT'] = 443
 				else:
-					auth = ''
+					logger.critical('Incorrect format: %s: %s', i + '_URL', server[i + '_URL'])
+					return None
+			else:
+				server[i + '_URL_PORT'] = int(server[i + '_URL_PORT'][1:])
+			
+			if server[i + '_PROXY_ADDR']:
 				try:
-					addr = socket.getaddrinfo(proxy[0], proxy[1])
+					addr = socket.getaddrinfo(server[i + '_PROXY_ADDR'], server[i + '_PROXY_PORT'])
 				except socket.gaierror as e:
 					logger.critical('Failed to process %s_PROXY settings (%s:%s): %s', i, proxy[0], proxy[1], str(e))
 					return None
 				except Exception:
 					raise
-				server[i + '_HDRS'] = _PROXY_HDRS % (server[i + '_URL'], server['APPP_UA'], auth)
-				server[i + '_URL'] = proxy
-				continue
-			# Direct connection
-			scheme, host, port, uri = match(
-				r"(http[s]?)://([0-9a-z\.\-]+)(:[0-9]+)?(/.*)", server[i + '_URL']).groups()
-			if port is None:
-				if scheme == 'http': port = 80
-				elif scheme == 'https': port = 443
-				else:
-					logger.critical('Incorrect format: %s: %s', i + '_URL', server[i + '_URL'])
-					return None
 			else:
-				port = int(port[1:])
-			try:
-				addr = socket.getaddrinfo(host, port)
-			except socket.gaierror as e:
-				logger.critical('Failed to process %s_URL (%s): %s', i, server[i + '_URL'], str(e))
-				return None
-			except Exception:
-				raise
-			server[i + '_URL'] = (host, port)
-			if _HDRS.find('\r\nHost: ') == -1:
-				_HDRS += 'Host: %s\r\n' % host
-			server[i + '_HDRS'] = _HDRS % (uri, server['APPP_UA'])
+				try:
+					addr = socket.getaddrinfo(server[i + '_URL_ADDR'], server[i + '_URL_PORT'])
+				except socket.gaierror as e:
+					logger.critical('Failed to process %s_URL (%s): %s', i, server[i + '_URL'], str(e))
+					return None
+				except Exception:
+					raise
 
 		# Calculate ARCFOUR vector only once
 		s = list(range(256))
@@ -537,7 +575,7 @@ def config(cfg, srv):
 		key = server['APPP_KEY']
 		if not key:
 			logger.critical('No APPP_KEY defined.')
-			return None			
+			return None
 		klen = len(key)
 		for i in range(256):
 			j = (j + s[i] + ord(key[i % klen])) % 256
