@@ -19,7 +19,7 @@ import getopt
 from hashlib import sha256
 import logging
 import os
-from re import match,sub
+from re import match,sub,split
 import socket
 import select
 import ssl
@@ -37,7 +37,7 @@ except ImportError:
 __APP__ = 'APPP'
 __VERSION__ = '0.2.0'
 
-BUFLEN = 4096
+BUFFER_LENGTH = 4096
 TIMEOUT = 6
 
 flag_exit = False
@@ -47,6 +47,7 @@ ch = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s APPP[%(threadName)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
+dns = {}
 
 def safebytes2(s):
 	b = bytearray(len(s))
@@ -184,6 +185,34 @@ def dummy_cert(commonname, certdir = 'crt', ca = 'APPP.pks', sans = ''):
 
 	return certpath
 
+def create_connection(address, socket_create_connection):
+	address1 = address[0].split('.')
+	i = 0
+	while i < len(address1):
+		address2 = '.'.join(address1[i::])
+		for key in dns.keys():
+			if address2 == key:
+				values = dns.get(key)
+				j = 0
+				while j < len(values):
+					if values[j][1] > 0:
+						address3 = (values[j][0], address[1])
+						try:
+							logger.info('Create connection to %s:%d' % address3)
+							
+							connection = socket_create_connection(address3)
+							if values[j][1] < 5:
+								values[j] = (values[j][0], values[j][1] + 1)
+							return connection
+						except Exception as e:
+							logger.info('Can not create connection to %s:%d' % address3)
+							
+							values[j] = (values[j][0], values[j][1] - 1)
+					j = j + 1
+		i = i + 1
+	connection = socket_create_connection(address)
+	return connection
+
 # Code framework modified from http://code.google.com/p/python-proxy/
 class ConnectionHandler:
 	def __init__(self, server, conn):
@@ -218,7 +247,7 @@ class ConnectionHandler:
 
 	def process(self):
 		while True:
-			s = self.client.recv(BUFLEN)
+			s = self.client.recv(BUFFER_LENGTH)
 			self.client_buffer += s
 			end = self.client_buffer.find(b'\r\n\r\n')
 			if len(s) == 0:
@@ -276,7 +305,7 @@ class ConnectionHandler:
 			self.req_read = True
 		
 		try:
-			s = "POST %s HTTP/1.0\r\n" % self.server[self.scheme + '_URL_RESOURCE']
+			s = 'POST %s HTTP/1.0\r\n' % self.server[self.scheme + '_URL_RESOURCE']
 			s = s + 'Accept-Encoding: identity\r\n'
 			s = s + 'Content-Type: application/x-www-form-urlencoded\r\n'
 			s = s + 'Connection: close\r\n'
@@ -314,32 +343,45 @@ class ConnectionHandler:
 				if self.server['HTTPS_PROXY_ADDR'] and self.server[self.scheme + '_URL_SCHEME'] == 'HTTPS':
 					s = s + '\r\n'
 					
-					self.target = socket.create_connection((self.server['HTTPS_PROXY_ADDR'], self.server['HTTPS_PROXY_PORT']))
+					def socket_create_connection(address):
+						connection = socket.create_connection((self.server['HTTPS_PROXY_ADDR'], self.server['HTTPS_PROXY_PORT']))
+						
+						s2 = 'CONNECT %s:%d HTTP/1.0\r\n' % address
+						if self.server['HTTP_PROXY_USER']:
+							authorization = base64.standard_b64encode((self.server['HTTPS_PROXY_USER'] + ':' + self.server['HTTPS_PROXY_PASS']).encode()).decode()
+							s2 = s2 + 'Proxy-Authorization: Basic %s\r\n' % authorization
+						s2 = s2 + '\r\n'
+						
+						connection.send(s2.encode())
+						
+						s3 = ''
+						while True:
+							s2 = connection.recv(BUFFER_LENGTH)
+							s3 = s3 + s2
+							end = s3.find(b'\r\n\r\n')
+							if len(s2) == 0:
+								break
+							if end != -1:
+								break
+						
+						s2 = s3.split(b'\r\n')[0]
+						if s2.split()[1] != b'200':
+							connection.close()
+							
+							raise Exception('Can not create connection to %s:%d' % address)
+						
+						return connection
 					
-					s2 = 'CONNECT %s:%d HTTP/1.0\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
-					if self.server['HTTP_PROXY_USER']:
-						authorization = base64.standard_b64encode((self.server['HTTPS_PROXY_USER'] + ':' + self.server['HTTPS_PROXY_PASS']).encode()).decode()
-						s2 = s2 + 'Proxy-Authorization: Basic %s\r\n' % authorization
-					s2 = s2 + '\r\n'
-					
-					self.target.send(s2.encode())
-					
-					s3 = ''
-					while True:
-						s2 = self.target.recv(BUFLEN)
-						s3 = s3 + s2
-						end = s3.find(b'\r\n\r\n')
-						if len(s2) == 0:
-							break
-						if end != -1:
-							break
-					
+					self.target = create_connection((self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT']), socket_create_connection)
 					self.target = ssl.wrap_socket(self.target, ssl_version = ssl.PROTOCOL_SSLv23)
 					self.target.do_handshake()
 				else:
 					s = s + '\r\n'
 					
-					self.target = socket.create_connection((self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT']))
+					def socket_create_connection(address):
+						return socket.create_connection(address)
+					
+					self.target = create_connection((self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT']), socket_create_connection)
 					if self.server[self.scheme + '_URL_SCHEME'] == "HTTPS":
 						self.target = ssl.wrap_socket(self.target, ssl_version = ssl.PROTOCOL_SSLv23)
 						self.target.do_handshake()
@@ -354,7 +396,7 @@ class ConnectionHandler:
 			return False
 
 		while True:
-			s = self.target.recv(BUFLEN)
+			s = self.target.recv(BUFFER_LENGTH)
 			self.client_buffer += s
 			end = self.client_buffer.find(b'\r\n\r\n')
 			if len(s) == 0:
@@ -390,7 +432,7 @@ class ConnectionHandler:
 			if error:
 				break
 			if recv:
-				data = in_sock.recv(BUFLEN)
+				data = in_sock.recv(BUFFER_LENGTH)
 				if data:
 					try:
 						out_sock.send(bytes(rc4.process(data)))
@@ -489,7 +531,7 @@ def test(server, scheme):
 			if error:
 				break
 			if recv:
-				data = s.recv(BUFLEN)
+				data = s.recv(BUFFER_LENGTH)
 				if data:
 					r += data
 					if r.find(b'\r\n') != -1:
@@ -560,14 +602,6 @@ def config(cfg, srv):
 					return None
 				except Exception:
 					raise
-			else:
-				try:
-					addr = socket.getaddrinfo(server[i + '_URL_ADDR'], server[i + '_URL_PORT'])
-				except socket.gaierror as e:
-					logger.critical('Failed to process %s_URL (%s): %s', i, server[i + '_URL'], str(e))
-					return None
-				except Exception:
-					raise
 
 		# Calculate ARCFOUR vector only once
 		s = list(range(256))
@@ -627,7 +661,7 @@ def main():
 	if debug: logger.setLevel(logging.DEBUG)
 	if servers == [] and runall == False:
 		logger.error("Please specify an APPP server to run, or use '-a' to run all servers! Exiting...")
-		sys.exit(1)		
+		sys.exit(1)
 	cfg = SafeConfigParser()
 	cfg.optionxform = str
 	runservers = {}
@@ -653,7 +687,25 @@ def main():
 	except Exception as e:
 		logger.critical(str(e))
 		sys.exit(1)
-
+	
+	cfg = SafeConfigParser()
+	cfg.optionxform = str
+	try:
+		logger.info("Read DNS.ini")
+		
+		cfg.readfp(open('DNS.ini'))
+		
+		for item in cfg.items("DNS"):
+			items = item[1].split(',')
+			i = 0
+			while i < len(items):
+				items[i] = (items[i].strip(), 5)
+				
+				i = i + 1
+			dns[item[0]] = items
+	except Exception as e:
+		logger.info("Can not read DNS.ini" + str(e))
+	
 	if len(runservers) == 0:
 		logger.critical("No runnable APPP server found! Exiting...")
 		sys.exit(1)
