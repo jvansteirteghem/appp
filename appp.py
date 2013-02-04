@@ -19,7 +19,7 @@ import getopt
 from hashlib import sha256
 import logging
 import os
-from re import match,sub,split
+from re import match,sub
 import socket
 import select
 import ssl
