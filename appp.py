@@ -307,8 +307,22 @@ class ConnectionHandler:
 		try:
 			s = 'POST %s HTTP/1.0\r\n' % self.server[self.scheme + '_URL_RESOURCE']
 			s = s + 'Accept-Encoding: identity\r\n'
-			s = s + 'Content-Type: application/x-www-form-urlencoded\r\n'
 			s = s + 'Connection: close\r\n'
+			s = s + 'Content-Length: %s\r\n' % str(len(self.client_hdrs) + self.data_size)
+			s = s + 'Content-Type: application/x-www-form-urlencoded\r\n'
+			
+			if self.server[self.scheme + '_URL_SCHEME'] == 'HTTP':
+				if self.server[self.scheme + '_URL_PORT'] == 80:
+					s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
+				else:
+					s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
+			else:
+				if self.server[self.scheme + '_URL_SCHEME'] == 'HTTPS':
+					if self.server[self.scheme + '_URL_PORT'] == 443:
+						s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
+					else:
+						s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
+			
 			s = s + 'User-Agent: %s\r\n' % self.server['APPP_UA']
 			
 			i = 1
@@ -316,21 +330,6 @@ class ConnectionHandler:
 				if self.server['CUSTOM_HEADER' + str(i)] != '':
 					s = s + self.server['CUSTOM_HEADER' + str(i)] + '\r\n'
 				i = i + 1
-			
-			if s.find('\r\nHost: ') == -1:
-				if self.server[self.scheme + '_URL_SCHEME'] == 'HTTP':
-					if self.server[self.scheme + '_URL_PORT'] == 80:
-						s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
-					else:
-						s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
-				else:
-					if self.server[self.scheme + '_URL_SCHEME'] == 'HTTPS':
-						if self.server[self.scheme + '_URL_PORT'] == 443:
-							s = s + 'Host: %s\r\n' % self.server[self.scheme + '_URL_ADDR']
-						else:
-							s = s + 'Host: %s:%d\r\n' % (self.server[self.scheme + '_URL_ADDR'], self.server[self.scheme + '_URL_PORT'])
-			
-			s = s + 'Content-Length: %s\r\n' % str(len(self.client_hdrs) + self.data_size)
 			
 			if self.server['HTTP_PROXY_ADDR'] and self.server[self.scheme + '_URL_SCHEME'] == 'HTTP':
 				if self.server['HTTP_PROXY_USER']:
