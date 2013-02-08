@@ -1,0 +1,2 @@
+APPP.exe -a
+pause
